@@ -14,6 +14,8 @@ from app.embeddings import embed_text, embed_batch
 from app import vectorstore
 from app.generation import generate_notes, _strip_markdown_code_fences
 from app.main import app
+from app import chat
+
 
 class TestChunking(unittest.TestCase):
     def test_chunk_text_basic(self):
@@ -180,6 +182,84 @@ class TestGeneration(unittest.TestCase):
         self.assertIn("GROUNDING RULES:", call_args)
         self.assertIn("Only use the provided CONTEXT", call_args)
 
+class TestChatModule(unittest.TestCase):
+    def setUp(self):
+        # Clear conversations before each test
+        chat.conversations.clear()
+
+    def test_get_or_create_conversation(self):
+        conv_id = "test-conv-1"
+        history = chat.get_or_create_conversation(conv_id)
+        self.assertEqual(history, [])
+        self.assertIn(conv_id, chat.conversations)
+        
+        # Test retrieving existing
+        history.append({"role": "user", "content": "hello"})
+        history2 = chat.get_or_create_conversation(conv_id)
+        self.assertEqual(history2, [{"role": "user", "content": "hello"}])
+
+    @patch("app.chat.genai.GenerativeModel")
+    @patch("app.embeddings.embed_text")
+    @patch("app.vectorstore.search")
+    @patch("app.vectorstore.doc_exists")
+    def test_chat_without_doc(self, mock_doc_exists, mock_search, mock_embed, mock_gen_model):
+        mock_doc_exists.return_value = False
+        
+        # Mock Gemini response
+        mock_response = MagicMock()
+        mock_response.text = "Hello! I am CheatMate."
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = mock_response
+        mock_gen_model.return_value = mock_model_instance
+        
+        conv_id = "test-conv-2"
+        response = chat.chat(conv_id, "Hello study assistant", doc_id=None)
+        
+        self.assertEqual(response, "Hello! I am CheatMate.")
+        # Verify history updated
+        history = chat.get_or_create_conversation(conv_id)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0], {"role": "user", "content": "Hello study assistant"})
+        self.assertEqual(history[1], {"role": "assistant", "content": "Hello! I am CheatMate."})
+        
+        # Verify GenerativeModel was initialized with correct system instruction
+        mock_gen_model.assert_called_once_with(
+            model_name="models/gemini-flash-lite-latest",
+            system_instruction=chat.SYSTEM_INSTRUCTION
+        )
+        # Verify search was not called
+        mock_search.assert_not_called()
+
+    @patch("app.chat.genai.GenerativeModel")
+    @patch("app.embeddings.embed_text")
+    @patch("app.vectorstore.search")
+    @patch("app.vectorstore.doc_exists")
+    def test_chat_with_doc(self, mock_doc_exists, mock_search, mock_embed, mock_gen_model):
+        mock_doc_exists.return_value = True
+        mock_embed.return_value = [0.1, 0.2]
+        mock_search.return_value = ["Grounded chunk 1", "Grounded chunk 2"]
+        
+        # Mock Gemini response
+        mock_response = MagicMock()
+        mock_response.text = "Grounded response."
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = mock_response
+        mock_gen_model.return_value = mock_model_instance
+        
+        conv_id = "test-conv-3"
+        response = chat.chat(conv_id, "Explain photosynthesis", doc_id="my-doc")
+        
+        self.assertEqual(response, "Grounded response.")
+        # Verify vector store query was performed
+        mock_doc_exists.assert_called_once_with("my-doc")
+        mock_embed.assert_called_once_with("Explain photosynthesis")
+        mock_search.assert_called_once_with("my-doc", [0.1, 0.2], top_k=5)
+        
+        # Verify prompt details
+        call_args = mock_model_instance.generate_content.call_args[0][0]
+        self.assertIn("CONTEXT:\nGrounded chunk 1\n---\nGrounded chunk 2", call_args)
+        self.assertIn("User: Explain photosynthesis", call_args)
+
 class TestAPIEndpoints(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
@@ -220,6 +300,45 @@ class TestAPIEndpoints(unittest.TestCase):
         response = self.client.post("/generate", json=payload)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"result": "Detailed notes content"})
+
+    @patch("app.main.chat.chat")
+    def test_chat_endpoint_new_conversation(self, mock_chat):
+        mock_chat.return_value = "Response from model"
+        
+        payload = {
+            "message": "Hello study assistant"
+        }
+        
+        response = self.client.post("/chat", json=payload)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("conversation_id", data)
+        self.assertEqual(data["response"], "Response from model")
+        
+        # Verify new conversation ID was a valid UUID4
+        import uuid
+        try:
+            uuid.UUID(data["conversation_id"], version=4)
+        except ValueError:
+            self.fail("conversation_id is not a valid UUIDv4")
+
+    @patch("app.main.chat.chat")
+    def test_chat_endpoint_existing_conversation(self, mock_chat):
+        mock_chat.return_value = "Response with history"
+        
+        payload = {
+            "conversation_id": "existing-uuid-1234",
+            "message": "Continue discussing",
+            "doc_id": "doc-uuid-5678"
+        }
+        
+        response = self.client.post("/chat", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "conversation_id": "existing-uuid-1234",
+            "response": "Response with history"
+        })
+        mock_chat.assert_called_once_with(conversation_id="existing-uuid-1234", message="Continue discussing", doc_id="doc-uuid-5678")
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,8 @@ from app.chunking import chunk_text
 from app.embeddings import embed_batch
 from app.vectorstore import save_chunks, doc_exists
 from app.generation import generate_notes
+from app import chat
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -31,6 +33,12 @@ class GenerateRequest(BaseModel):
     doc_id: str
     feature: str
     instruction: str
+
+# Request schema for chat
+class ChatRequest(BaseModel):
+    conversation_id: str | None = None
+    message: str
+    doc_id: str | None = None
 
 @app.get("/health")
 def health_check():
@@ -106,6 +114,29 @@ def generate_study_material(payload: GenerateRequest):
     except Exception as e:
         print(f"Error during generation: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate material: {str(e)}")
+
+@app.post("/chat")
+def chat_with_assistant(payload: ChatRequest):
+    """
+    Handles free-form educational chat with optional document grounding.
+    """
+    conversation_id = payload.conversation_id
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+        
+    try:
+        response_text = chat.chat(
+            conversation_id=conversation_id,
+            message=payload.message,
+            doc_id=payload.doc_id
+        )
+        return {
+            "conversation_id": conversation_id,
+            "response": response_text
+        }
+    except Exception as e:
+        print(f"Error in chat endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
 
 if __name__ == "__main__":
     # Run uvicorn on port 8000 with reload=True
