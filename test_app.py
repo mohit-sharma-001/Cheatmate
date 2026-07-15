@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 # Setup dummy environment key before importing app components
 os.environ["GEMINI_API_KEY"] = "dummy_key_for_testing"
+os.environ["SUPABASE_DB_URL"] = "postgresql://postgres:dummy@localhost:5432/postgres"
 
 from app.chunking import chunk_text
 from app.pdf_utils import extract_text_from_pdf
@@ -85,42 +86,51 @@ class TestEmbeddings(unittest.TestCase):
         self.assertEqual(mock_sleep.call_count, 3)
 
 class TestVectorStore(unittest.TestCase):
-    def setUp(self):
-        # Use a separate test doc_id
-        self.test_doc_id = "test-doc-123"
-        self.test_file_path = vectorstore._get_doc_path(self.test_doc_id)
-        # Ensure clean state
-        if os.path.exists(self.test_file_path):
-            os.remove(self.test_file_path)
+    @patch("psycopg2.connect")
+    def test_save_chunks(self, mock_connect):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.__enter__.return_value = mock_cur
+        mock_conn.cursor.return_value = mock_cur
+        mock_connect.return_value = mock_conn
+        
+        chunks = ["chunk1", "chunk2"]
+        embeddings = [[0.1, 0.2], [0.3, 0.4]]
+        
+        vectorstore.save_chunks("test-doc", chunks, embeddings)
+        
+        mock_connect.assert_called_once_with(vectorstore.DB_URL)
+        self.assertTrue(mock_cur.executemany.called)
+        mock_conn.commit.assert_called_once()
+        mock_conn.close.assert_called_once()
 
-    def tearDown(self):
-        if os.path.exists(self.test_file_path):
-            os.remove(self.test_file_path)
+    @patch("psycopg2.connect")
+    def test_search(self, mock_connect):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.__enter__.return_value = mock_cur
+        mock_cur.fetchall.return_value = [("result text 1",), ("result text 2",)]
+        mock_conn.cursor.return_value = mock_cur
+        mock_connect.return_value = mock_conn
+        
+        results = vectorstore.search("test-doc", [0.1, 0.2], top_k=2)
+        
+        self.assertEqual(results, ["result text 1", "result text 2"])
+        self.assertTrue(mock_cur.execute.called)
+        mock_conn.close.assert_called_once()
 
-    def test_save_and_search_and_exists(self):
-        chunks = [
-            "FastAPI is a modern, fast (high-performance) web framework for building APIs with Python.",
-            "Retrieval-Augmented Generation (RAG) is a technique for grounding large language models.",
-            "Numpy is a library for the Python programming language, adding support for large, multi-dimensional arrays."
-        ]
-        # Embeddings as simple unit vectors to test cosine similarity logic
-        embeddings = [
-            [1.0, 0.0, 0.0], # FastAPI
-            [0.0, 1.0, 0.0], # RAG
-            [0.0, 0.0, 1.0]  # Numpy
-        ]
+    @patch("psycopg2.connect")
+    def test_doc_exists(self, mock_connect):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.__enter__.return_value = mock_cur
+        mock_cur.fetchone.return_value = (True,)
+        mock_conn.cursor.return_value = mock_cur
+        mock_connect.return_value = mock_conn
         
-        # Save
-        vectorstore.save_chunks(self.test_doc_id, chunks, embeddings)
-        self.assertTrue(vectorstore.doc_exists(self.test_doc_id))
-        
-        # Search query matching first document (FastAPI)
-        query = [0.9, 0.1, 0.0]
-        results = vectorstore.search(self.test_doc_id, query, top_k=2)
-        
-        self.assertEqual(len(results), 2)
-        # The closest should be the FastAPI chunk
-        self.assertEqual(results[0], chunks[0])
+        exists = vectorstore.doc_exists("test-doc")
+        self.assertTrue(exists)
+        mock_conn.close.assert_called_once()
 
 class TestGeneration(unittest.TestCase):
     def test_strip_markdown_code_fences(self):

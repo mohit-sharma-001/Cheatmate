@@ -25,7 +25,8 @@ def embed_text(text: str) -> list[float]:
         try:
             response = genai.embed_content(
                 model="models/gemini-embedding-001",
-                content=text
+                content=text,
+                output_dimensionality=768
             )
             # Handle different SDK response formats safely
             embedding = response["embedding"] if isinstance(response, dict) else response.embedding
