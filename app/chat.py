@@ -1,4 +1,5 @@
 import os
+import psycopg2
 import google.generativeai as genai
 from dotenv import load_dotenv
 from app import embeddings
@@ -6,6 +7,7 @@ from app import vectorstore
 
 # Load environment variables
 load_dotenv()
+DB_URL = os.getenv("SUPABASE_DB_URL")
 
 # Configure Gemini API client
 api_key = os.getenv("GEMINI_API_KEY")
@@ -13,10 +15,6 @@ if api_key:
     genai.configure(api_key=api_key)
 else:
     print("Warning: GEMINI_API_KEY not found in environment. Please set it in your .env file.")
-
-# In-memory conversation store (simple dict for MVP, resets on server restart)
-# conversation_id -> list of {role, content} messages
-conversations = {}
 
 # Exact word-for-word system instruction required for Gemini
 SYSTEM_INSTRUCTION = """You are CheatMate, an AI study assistant. Your ONLY purpose is to 
@@ -44,57 +42,208 @@ academic answers in it. If the context doesn't fully answer the
 question, use your general academic knowledge but stay strictly 
 within educational topics."""
 
-def get_or_create_conversation(conversation_id: str) -> list:
+def _parse_db_url(url: str) -> dict:
     """
-    Returns existing conversation history list or creates a new empty list.
+    Manually parses connection parameters from a postgresql:// URL.
+    This matches the robust parsing logic in app/vectorstore.py.
     """
-    if conversation_id not in conversations:
-        conversations[conversation_id] = []
-    return conversations[conversation_id]
+    if not url.startswith("postgresql://"):
+        raise ValueError("Invalid URL scheme. Must start with postgresql://")
+        
+    remainder = url[len("postgresql://"):]
+    
+    if "/" in remainder:
+        authority, dbname = remainder.rsplit("/", 1)
+    else:
+        authority = remainder
+        dbname = ""
+        
+    if "@" in authority:
+        creds, host_port = authority.rsplit("@", 1)
+    else:
+        creds = ""
+        host_port = authority
+        
+    if ":" in creds:
+        username, password = creds.split(":", 1)
+    else:
+        username = creds
+        password = ""
+        
+    if ":" in host_port:
+        host, port = host_port.rsplit(":", 1)
+        try:
+            port = int(port)
+        except ValueError:
+            port = 5432
+    else:
+        host = host_port
+        port = 5432
+        
+    from urllib.parse import unquote
+    username = unquote(username)
+    password = unquote(password)
+    
+    return {
+        "user": username,
+        "password": password,
+        "host": host,
+        "port": port,
+        "database": dbname
+    }
 
-def chat(conversation_id: str, message: str, doc_id: str | None) -> str:
+def _get_connection():
     """
-    Performs a single chat turn. Handles RAG grounding with optional doc_id,
-    constructs the prompt with context and history (last 6 messages),
-    calls Gemini model, updates in-memory history, and returns the response.
+    Establishes connection to the Supabase Postgres database.
+    This matches the connection pattern in app/vectorstore.py.
     """
-    # a. Get conversation history for conversation_id
-    history = get_or_create_conversation(conversation_id)
+    if not DB_URL:
+        raise ValueError("SUPABASE_DB_URL environment variable is not set. Please set it in your .env file.")
+        
+    try:
+        return psycopg2.connect(DB_URL)
+    except psycopg2.OperationalError as e:
+        err_str = str(e).lower()
+        if "invalid dsn" in err_str or "percent" in err_str or "parse" in err_str:
+            creds = _parse_db_url(DB_URL)
+            return psycopg2.connect(
+                dbname=creds['database'],
+                user=creds['user'],
+                password=creds['password'],
+                host=creds['host'],
+                port=creds['port']
+            )
+        raise e
 
-    # b. If doc_id is provided and exists, get relevant document chunks
+def get_or_create_conversation(conversation_id: str | None) -> str:
+    """
+    Verifies if a conversation ID exists in the DB, returning it if found.
+    If not provided or not found, creates a new conversation row and returns its UUID.
+    """
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            if conversation_id:
+                try:
+                    # Check if the conversation row exists
+                    cur.execute("SELECT EXISTS(SELECT 1 FROM conversations WHERE id = %s)", (conversation_id,))
+                    exists = cur.fetchone()[0]
+                    if exists:
+                        return conversation_id
+                except Exception:
+                    # If invalid UUID string, postgres will fail. Rollback and generate a new one.
+                    if conn:
+                        conn.rollback()
+            
+            # Create a new conversation row letting Postgres generate the UUID
+            cur.execute("INSERT INTO conversations DEFAULT VALUES RETURNING id")
+            new_id = cur.fetchone()[0]
+            conn.commit()
+            return str(new_id)
+    except Exception as e:
+        print(f"Database error in get_or_create_conversation: {e}")
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            conn.close()
+
+def get_recent_messages(conversation_id: str, limit: int = 6) -> list[dict]:
+    """
+    Queries the messages table for conversation_id, ordered by created_at ascending,
+    limited to the most recent 'limit' messages.
+    """
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            # Query the most recent messages sorted descending, then we reverse them in Python
+            query = """
+                SELECT role, content FROM messages
+                WHERE conversation_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT %s
+            """
+            cur.execute(query, (conversation_id, limit))
+            rows = cur.fetchall()
+            
+            # Convert to list of dicts and reverse to restore chronological order
+            messages = [{"role": row[0], "content": row[1]} for row in rows]
+            messages.reverse()
+            return messages
+    except Exception as e:
+        print(f"Database error in get_recent_messages: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
+def save_message(conversation_id: str, role: str, content: str) -> None:
+    """
+    Inserts one row into the messages table.
+    """
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            query = """
+                INSERT INTO messages (conversation_id, role, content)
+                VALUES (%s, %s, %s)
+            """
+            cur.execute(query, (conversation_id, role, content))
+            conn.commit()
+    except Exception as e:
+        print(f"Database error in save_message: {e}")
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if conn:
+            conn.close()
+
+def chat(conversation_id: str | None, message: str, doc_id: str | None) -> tuple[str, str]:
+    """
+    Performs a single chat turn. Handles RAG grounding, queries Gemini with
+    recent message history from the DB, saves both user/assistant turns to the DB,
+    and returns a tuple of (response_text, conversation_id).
+    """
+    # Get a valid verified conversation ID
+    conversation_id = get_or_create_conversation(conversation_id)
+
+    # Get recent messages from Postgres
+    recent_messages = get_recent_messages(conversation_id, limit=6)
+
+    # Grounding context from document
     context = None
     if doc_id and vectorstore.doc_exists(doc_id):
-        # Generate embedding for the query message
         query_embedding = embeddings.embed_text(message)
-        # Search top 5 relevant text chunks
         relevant_chunks = vectorstore.search(doc_id, query_embedding, top_k=5)
         if relevant_chunks:
             context = "\n---\n".join(relevant_chunks)
 
-    # c & d. Build the prompt with system instruction, last 6 messages + CONTEXT + new message
-    # Take last 6 messages from history
-    last_6 = history[-6:]
-    
+    # Build prompt
     prompt_parts = []
     
-    # Format the conversation history
-    if last_6:
+    # Format message history
+    if recent_messages:
         history_lines = []
-        for msg in last_6:
+        for msg in recent_messages:
             role_label = "User" if msg["role"] == "user" else "Assistant"
             history_lines.append(f"{role_label}: {msg['content']}")
         prompt_parts.append("\n".join(history_lines))
     
-    # Append context if available
+    # Append context
     if context:
         prompt_parts.append(f"CONTEXT:\n{context}")
         
-    # Append the new user message
+    # Append new user message
     prompt_parts.append(f"User: {message}")
     
     full_prompt = "\n\n".join(prompt_parts)
 
-    # e. Call Gemini model models/gemini-flash-lite-latest
+    # Call Gemini model
     model = genai.GenerativeModel(
         model_name="models/gemini-flash-lite-latest",
         system_instruction=SYSTEM_INSTRUCTION
@@ -103,9 +252,9 @@ def chat(conversation_id: str, message: str, doc_id: str | None) -> str:
     response = model.generate_content(full_prompt)
     response_text = response.text
 
-    # f. Append both the user message and assistant's response to history
-    history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": response_text})
+    # Save both user prompt and model response to Postgres
+    save_message(conversation_id, "user", message)
+    save_message(conversation_id, "assistant", response_text)
 
-    # g. Return the assistant's response
-    return response_text
+    # Return response and verified/new conversation ID
+    return response_text, conversation_id

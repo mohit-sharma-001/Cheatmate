@@ -120,13 +120,9 @@ def chat_with_assistant(payload: ChatRequest):
     """
     Handles free-form educational chat with optional document grounding.
     """
-    conversation_id = payload.conversation_id
-    if not conversation_id:
-        conversation_id = str(uuid.uuid4())
-        
     try:
-        response_text = chat.chat(
-            conversation_id=conversation_id,
+        response_text, conversation_id = chat.chat(
+            conversation_id=payload.conversation_id,
             message=payload.message,
             doc_id=payload.doc_id
         )

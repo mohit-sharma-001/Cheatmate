@@ -183,27 +183,77 @@ class TestGeneration(unittest.TestCase):
         self.assertIn("Only use the provided CONTEXT", call_args)
 
 class TestChatModule(unittest.TestCase):
-    def setUp(self):
-        # Clear conversations before each test
-        chat.conversations.clear()
+    @patch("app.chat._get_connection")
+    def test_get_or_create_conversation_existing(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (True,)
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
 
-    def test_get_or_create_conversation(self):
-        conv_id = "test-conv-1"
-        history = chat.get_or_create_conversation(conv_id)
-        self.assertEqual(history, [])
-        self.assertIn(conv_id, chat.conversations)
-        
-        # Test retrieving existing
-        history.append({"role": "user", "content": "hello"})
-        history2 = chat.get_or_create_conversation(conv_id)
-        self.assertEqual(history2, [{"role": "user", "content": "hello"}])
+        res = chat.get_or_create_conversation("existing-uuid")
+        self.assertEqual(res, "existing-uuid")
+        mock_cur.execute.assert_called_once_with(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = %s)", 
+            ("existing-uuid",)
+        )
 
+    @patch("app.chat._get_connection")
+    def test_get_or_create_conversation_new(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        # EXISTS query returns False, INSERT DEFAULT VALUES query returns new ID
+        mock_cur.fetchone.side_effect = [(False,), ("new-uuid-123",)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        res = chat.get_or_create_conversation("non-existent-uuid")
+        self.assertEqual(res, "new-uuid-123")
+        self.assertEqual(mock_cur.execute.call_count, 2)
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.chat._get_connection")
+    def test_get_recent_messages(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        # Mock recent messages returned from DB (newest first, which is what query fetches)
+        mock_cur.fetchall.return_value = [
+            ("assistant", "response 1"),
+            ("user", "message 1")
+        ]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        res = chat.get_recent_messages("some-uuid", limit=6)
+        # Verify chronological order (reversed in python to user message first)
+        self.assertEqual(res, [
+            {"role": "user", "content": "message 1"},
+            {"role": "assistant", "content": "response 1"}
+        ])
+
+    @patch("app.chat._get_connection")
+    def test_save_message(self, mock_get_conn):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        chat.save_message("some-uuid", "user", "hello")
+        mock_cur.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.chat.save_message")
+    @patch("app.chat.get_recent_messages")
+    @patch("app.chat.get_or_create_conversation")
     @patch("app.chat.genai.GenerativeModel")
     @patch("app.embeddings.embed_text")
     @patch("app.vectorstore.search")
     @patch("app.vectorstore.doc_exists")
-    def test_chat_without_doc(self, mock_doc_exists, mock_search, mock_embed, mock_gen_model):
+    def test_chat_without_doc(self, mock_doc_exists, mock_search, mock_embed, mock_gen_model, 
+                              mock_get_or_create, mock_get_recent, mock_save_msg):
         mock_doc_exists.return_value = False
+        mock_get_or_create.return_value = "verified-uuid"
+        mock_get_recent.return_value = [{"role": "user", "content": "hello"}]
         
         # Mock Gemini response
         mock_response = MagicMock()
@@ -212,15 +262,15 @@ class TestChatModule(unittest.TestCase):
         mock_model_instance.generate_content.return_value = mock_response
         mock_gen_model.return_value = mock_model_instance
         
-        conv_id = "test-conv-2"
-        response = chat.chat(conv_id, "Hello study assistant", doc_id=None)
+        response, returned_id = chat.chat("test-conv-2", "Hello study assistant", doc_id=None)
         
         self.assertEqual(response, "Hello! I am CheatMate.")
-        # Verify history updated
-        history = chat.get_or_create_conversation(conv_id)
-        self.assertEqual(len(history), 2)
-        self.assertEqual(history[0], {"role": "user", "content": "Hello study assistant"})
-        self.assertEqual(history[1], {"role": "assistant", "content": "Hello! I am CheatMate."})
+        self.assertEqual(returned_id, "verified-uuid")
+        
+        # Verify messages saved
+        self.assertEqual(mock_save_msg.call_count, 2)
+        mock_save_msg.assert_any_call("verified-uuid", "user", "Hello study assistant")
+        mock_save_msg.assert_any_call("verified-uuid", "assistant", "Hello! I am CheatMate.")
         
         # Verify GenerativeModel was initialized with correct system instruction
         mock_gen_model.assert_called_once_with(
@@ -230,12 +280,18 @@ class TestChatModule(unittest.TestCase):
         # Verify search was not called
         mock_search.assert_not_called()
 
+    @patch("app.chat.save_message")
+    @patch("app.chat.get_recent_messages")
+    @patch("app.chat.get_or_create_conversation")
     @patch("app.chat.genai.GenerativeModel")
     @patch("app.embeddings.embed_text")
     @patch("app.vectorstore.search")
     @patch("app.vectorstore.doc_exists")
-    def test_chat_with_doc(self, mock_doc_exists, mock_search, mock_embed, mock_gen_model):
+    def test_chat_with_doc(self, mock_doc_exists, mock_search, mock_embed, mock_gen_model,
+                           mock_get_or_create, mock_get_recent, mock_save_msg):
         mock_doc_exists.return_value = True
+        mock_get_or_create.return_value = "verified-uuid"
+        mock_get_recent.return_value = []
         mock_embed.return_value = [0.1, 0.2]
         mock_search.return_value = ["Grounded chunk 1", "Grounded chunk 2"]
         
@@ -246,10 +302,11 @@ class TestChatModule(unittest.TestCase):
         mock_model_instance.generate_content.return_value = mock_response
         mock_gen_model.return_value = mock_model_instance
         
-        conv_id = "test-conv-3"
-        response = chat.chat(conv_id, "Explain photosynthesis", doc_id="my-doc")
+        response, returned_id = chat.chat("test-conv-3", "Explain photosynthesis", doc_id="my-doc")
         
         self.assertEqual(response, "Grounded response.")
+        self.assertEqual(returned_id, "verified-uuid")
+        
         # Verify vector store query was performed
         mock_doc_exists.assert_called_once_with("my-doc")
         mock_embed.assert_called_once_with("Explain photosynthesis")
@@ -303,7 +360,7 @@ class TestAPIEndpoints(unittest.TestCase):
 
     @patch("app.main.chat.chat")
     def test_chat_endpoint_new_conversation(self, mock_chat):
-        mock_chat.return_value = "Response from model"
+        mock_chat.return_value = ("Response from model", "generated-uuid-5678")
         
         payload = {
             "message": "Hello study assistant"
@@ -315,16 +372,12 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertIn("conversation_id", data)
         self.assertEqual(data["response"], "Response from model")
         
-        # Verify new conversation ID was a valid UUID4
-        import uuid
-        try:
-            uuid.UUID(data["conversation_id"], version=4)
-        except ValueError:
-            self.fail("conversation_id is not a valid UUIDv4")
+        # Verify conversation ID returned from mock_chat is used
+        self.assertEqual(data["conversation_id"], "generated-uuid-5678")
 
     @patch("app.main.chat.chat")
     def test_chat_endpoint_existing_conversation(self, mock_chat):
-        mock_chat.return_value = "Response with history"
+        mock_chat.return_value = ("Response with history", "existing-uuid-1234")
         
         payload = {
             "conversation_id": "existing-uuid-1234",
