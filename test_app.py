@@ -15,6 +15,8 @@ from app import vectorstore
 from app.generation import generate_notes, _strip_markdown_code_fences
 from app.main import app
 from app import chat
+from app.extract import extract_text_from_docx, extract_text_from_txt, extract_text_from_image
+
 
 
 class TestChunking(unittest.TestCase):
@@ -55,6 +57,63 @@ class TestPDFUtils(unittest.TestCase):
         result = extract_text_from_pdf(b"dummy pdf bytes")
         self.assertIn("Page 1 content", result)
         self.assertIn("Page 2 content", result)
+
+class TestExtraction(unittest.TestCase):
+    @patch("app.extract.Document")
+    def test_extract_text_from_docx(self, mock_document):
+        # Mock paragraph structure
+        mock_p1 = MagicMock()
+        mock_p1.text = "Hello world paragraph."
+        mock_p2 = MagicMock()
+        mock_p2.text = "Second paragraph."
+        
+        # Mock table structure
+        mock_cell1 = MagicMock()
+        mock_cell1.text = "Cell1"
+        mock_cell2 = MagicMock()
+        mock_cell2.text = "Cell2"
+        mock_row1 = MagicMock()
+        mock_row1.cells = [mock_cell1, mock_cell2]
+        mock_table1 = MagicMock()
+        mock_table1.rows = [mock_row1]
+        
+        mock_doc_instance = MagicMock()
+        mock_doc_instance.paragraphs = [mock_p1, mock_p2]
+        mock_doc_instance.tables = [mock_table1]
+        mock_document.return_value = mock_doc_instance
+        
+        result = extract_text_from_docx(b"mock docx bytes")
+        self.assertIn("Hello world paragraph.", result)
+        self.assertIn("Second paragraph.", result)
+        self.assertIn("Cell1 | Cell2", result)
+
+    def test_extract_text_from_txt(self):
+        # Test valid utf-8 decoding
+        result = extract_text_from_txt(b"Hello world from text.")
+        self.assertEqual(result, "Hello world from text.")
+        
+        # Test invalid bytes fallback (errors="ignore")
+        result_corrupted = extract_text_from_txt(b"Hello \xff world.")
+        self.assertEqual(result_corrupted, "Hello  world.")
+
+    @patch("app.extract.genai.GenerativeModel")
+    def test_extract_text_from_image(self, mock_gen_model):
+        mock_response = MagicMock()
+        mock_response.text = "Text from image transcription"
+        mock_model_instance = MagicMock()
+        mock_model_instance.generate_content.return_value = mock_response
+        mock_gen_model.return_value = mock_model_instance
+        
+        result = extract_text_from_image(b"fake image bytes", "image/png")
+        self.assertEqual(result, "Text from image transcription")
+        
+        # Verify model and arguments
+        mock_gen_model.assert_called_once_with("models/gemini-flash-lite-latest")
+        call_args = mock_model_instance.generate_content.call_args[0][0]
+        self.assertEqual(call_args[0]["mime_type"], "image/png")
+        self.assertEqual(call_args[0]["data"], b"fake image bytes")
+        self.assertIn("Extract all text", call_args[1])
+
 
 class TestEmbeddings(unittest.TestCase):
     @patch("google.generativeai.embed_content")
@@ -341,6 +400,55 @@ class TestAPIEndpoints(unittest.TestCase):
         data = response.json()
         self.assertIn("doc_id", data)
         self.assertEqual(data["num_chunks"], 1)
+
+    @patch("app.main.extract_text_from_docx")
+    @patch("app.main.embed_batch")
+    @patch("app.main.save_chunks")
+    def test_upload_endpoint_docx(self, mock_save, mock_embed_batch, mock_extract_docx):
+        mock_extract_docx.return_value = "Extracted DOCX content."
+        mock_embed_batch.return_value = [[0.1, 0.2]]
+        
+        files = {"file": ("test.docx", b"dummy docx bytes", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
+        response = self.client.post("/upload", files=files)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("doc_id", data)
+        mock_extract_docx.assert_called_once()
+
+    @patch("app.main.extract_text_from_txt")
+    @patch("app.main.embed_batch")
+    @patch("app.main.save_chunks")
+    def test_upload_endpoint_txt(self, mock_save, mock_embed_batch, mock_extract_txt):
+        mock_extract_txt.return_value = "Extracted TXT content."
+        mock_embed_batch.return_value = [[0.1, 0.2]]
+        
+        files = {"file": ("test.txt", b"dummy txt content", "text/plain")}
+        response = self.client.post("/upload", files=files)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("doc_id", data)
+        mock_extract_txt.assert_called_once()
+
+    @patch("app.main.extract_text_from_image")
+    @patch("app.main.embed_batch")
+    @patch("app.main.save_chunks")
+    def test_upload_endpoint_image(self, mock_save, mock_embed_batch, mock_extract_img):
+        mock_extract_img.return_value = "Extracted image text content."
+        mock_embed_batch.return_value = [[0.1, 0.2]]
+        
+        files = {"file": ("test.png", b"fake image bytes", "image/png")}
+        response = self.client.post("/upload", files=files)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("doc_id", data)
+        mock_extract_img.assert_called_once_with(b"fake image bytes", "image/png")
+
+    def test_upload_endpoint_unsupported(self):
+        files = {"file": ("test.exe", b"binary executable", "application/octet-stream")}
+        response = self.client.post("/upload", files=files)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["detail"], "Unsupported file type. Supported formats: PDF, DOCX, TXT, JPG, PNG")
+
 
     @patch("app.main.doc_exists")
     @patch("app.main.generate_notes")

@@ -10,6 +10,8 @@ from app.embeddings import embed_batch
 from app.vectorstore import save_chunks, doc_exists
 from app.generation import generate_notes
 from app import chat
+from app.extract import extract_text_from_docx, extract_text_from_txt, extract_text_from_image
+
 
 
 # Initialize FastAPI app
@@ -48,27 +50,47 @@ def health_check():
     return {"status": "ok"}
 
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...)):
     """
-    Accepts a PDF upload, extracts the text, chunks it, generates embeddings for each chunk,
-    saves the data in the local vector store, and returns a unique document ID.
+    Accepts an upload of supported files (PDF, DOCX, TXT, JPG, PNG), extracts the text,
+    chunks it, generates embeddings for each chunk, saves the data in the local vector store,
+    and returns a unique document ID.
     """
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    filename = file.filename.lower()
+    supported_extensions = (".pdf", ".docx", ".txt", ".jpg", ".jpeg", ".png")
+    if not filename.endswith(supported_extensions):
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Supported formats: PDF, DOCX, TXT, JPG, PNG"
+        )
         
     try:
         # Read the file content
         file_bytes = await file.read()
         
-        # 1. Extract text from PDF
-        text = extract_text_from_pdf(file_bytes)
+        # 1. Extract text based on file format
+        if filename.endswith(".pdf"):
+            text = extract_text_from_pdf(file_bytes)
+        elif filename.endswith(".docx"):
+            text = extract_text_from_docx(file_bytes)
+        elif filename.endswith(".txt"):
+            text = extract_text_from_txt(file_bytes)
+        elif filename.endswith((".jpg", ".jpeg", ".png")):
+            mime_type = "image/png" if filename.endswith(".png") else "image/jpeg"
+            text = extract_text_from_image(file_bytes, mime_type)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported file type. Supported formats: PDF, DOCX, TXT, JPG, PNG"
+            )
+            
         if not text.strip():
-            raise HTTPException(status_code=400, detail="The uploaded PDF has no extractable text.")
+            raise HTTPException(status_code=400, detail="The uploaded file has no extractable text.")
             
         # 2. Chunk text
         chunks = chunk_text(text)
         if not chunks:
-            raise HTTPException(status_code=400, detail="PDF content resulted in no valid text chunks.")
+            raise HTTPException(status_code=400, detail="File content resulted in no valid text chunks.")
             
         # 3. Generate doc_id
         doc_id = str(uuid.uuid4())
