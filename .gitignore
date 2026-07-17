@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .env
 app/storage/*.json
+cheatmate-frontend/node_modules/
+cheatmate-frontend/.next/
+cheatmate-frontend/.env.local

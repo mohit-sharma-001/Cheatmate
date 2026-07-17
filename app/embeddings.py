@@ -2,6 +2,7 @@ import os
 import time
 import google.generativeai as genai
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 # Load environment variables from .env
 load_dotenv()
@@ -47,12 +48,15 @@ def embed_text(text: str) -> list[float]:
 
 def embed_batch(texts: list[str]) -> list[list[float]]:
     """
-    Embeds a list of text chunks by calling embed_text individually.
-    Adds a 0.1-second delay between calls to prevent rate limiting.
+    Embeds a list of text chunks in parallel using ThreadPoolExecutor.
+    
+    ThreadPoolExecutor is chosen here because calls to the Gemini API are network
+    I/O-bound rather than CPU-bound. Utilizing threads allows multiple network
+    requests to run concurrently, yielding a significant speedup without being
+    limited by Python's Global Interpreter Lock (GIL).
+    
+    Uses max_workers=5 to balance performance and Gemini API rate limits.
     """
-    results = []
-    for text in texts:
-        embedding = embed_text(text)
-        results.append(embedding)
-        time.sleep(0.1)
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(embed_text, texts))
     return results

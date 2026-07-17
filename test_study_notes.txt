@@ -1,0 +1,19 @@
+Introduction to Computer Networks
+
+A computer network is a set of computers sharing resources located on or provided by network nodes. The computers use common communication protocols over digital interconnections to communicate with each other.
+
+Key Concepts:
+1. TCP/IP Protocol Suite:
+   The Transmission Control Protocol/Internet Protocol (TCP/IP) is a suite of communication protocols used to interconnect network devices on the internet.
+   - TCP: Transmission Control Protocol. It is connection-oriented, reliable, and guarantees the delivery of data packets in the correct order.
+   - IP: Internet Protocol. It is connectionless and responsible for addressing and routing packets from the source to the destination node.
+
+2. Domain Name System (DNS):
+   DNS acts as the phonebook of the Internet. It translates human-readable hostnames (like www.google.com) into machine-readable IP addresses (like 142.250.190.46).
+
+3. HTTP / HTTPS:
+   Hypertext Transfer Protocol is the foundation of the World Wide Web. HTTPS is the secure version, which encrypts communications using TLS/SSL to protect sensitive data transfer.
+
+4. IP Addresses:
+   - IPv4: 32-bit address space, written in dot-decimal notation (e.g. 192.168.1.1).
+   - IPv6: 128-bit address space, developed to replace IPv4 due to address exhaustion, written in hexadecimal notation.

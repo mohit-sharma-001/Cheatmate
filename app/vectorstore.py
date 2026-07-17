@@ -1,5 +1,6 @@
 import os
 import psycopg2
+from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 
 # Load database URL from environment variables
@@ -85,16 +86,16 @@ def _get_connection():
 def save_chunks(doc_id: str, chunks: list[str], embeddings: list[list[float]]):
     """
     Saves document chunks and their corresponding embeddings into the Supabase database.
-    Each chunk is inserted as a separate row in the chunks table.
+    Inserts all chunks in a single bulk operation using psycopg2's execute_values.
     """
     conn = None
     try:
         conn = _get_connection()
         with conn.cursor() as cur:
-            # Query template using pgvector cast (%s::vector)
+            # Query template for bulk insert
             query = """
                 INSERT INTO chunks (doc_id, chunk_id, text, embedding)
-                VALUES (%s, %s, %s, %s::vector)
+                VALUES %s
             """
             
             # Prepare rows to insert
@@ -104,8 +105,8 @@ def save_chunks(doc_id: str, chunks: list[str], embeddings: list[list[float]]):
                 emb_str = f"[{','.join(map(str, embedding))}]"
                 records.append((doc_id, idx, chunk, emb_str))
             
-            # Insert all records
-            cur.executemany(query, records)
+            # Insert all records in bulk
+            execute_values(cur, query, records, template="(%s, %s, %s, %s::vector)")
             conn.commit()
             
     except Exception as e:

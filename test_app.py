@@ -144,11 +144,12 @@ class TestEmbeddings(unittest.TestCase):
         self.assertEqual(len(embeddings), 3)
         self.assertEqual(embeddings[0], [0.9, 0.8])
         self.assertEqual(mock_embed_text.call_count, 3)
-        self.assertEqual(mock_sleep.call_count, 3)
+        mock_sleep.assert_not_called()
 
 class TestVectorStore(unittest.TestCase):
     @patch("psycopg2.connect")
-    def test_save_chunks(self, mock_connect):
+    @patch("app.vectorstore.execute_values")
+    def test_save_chunks(self, mock_execute_values, mock_connect):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_cur.__enter__.return_value = mock_cur
@@ -161,7 +162,7 @@ class TestVectorStore(unittest.TestCase):
         vectorstore.save_chunks("test-doc", chunks, embeddings)
         
         mock_connect.assert_called_once_with(vectorstore.DB_URL)
-        self.assertTrue(mock_cur.executemany.called)
+        mock_execute_values.assert_called_once()
         mock_conn.commit.assert_called_once()
         mock_conn.close.assert_called_once()
 
