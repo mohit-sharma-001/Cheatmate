@@ -1,5 +1,5 @@
 import uuid
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -11,6 +11,7 @@ from app.vectorstore import save_chunks, doc_exists
 from app.generation import generate_notes
 from app import chat
 from app.extract import extract_text_from_docx, extract_text_from_txt, extract_text_from_image
+from app import auth, usage
 
 
 
@@ -50,7 +51,12 @@ def health_check():
     return {"status": "ok"}
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(None),
+    x_guest_id: str | None = Header(None, alias="X-Guest-Id"),
+    conversation_id: str | None = Form(None)
+):
     """
     Accepts an upload of supported files (PDF, DOCX, TXT, JPG, PNG), extracts the text,
     chunks it, generates embeddings for each chunk, saves the data in the local vector store,
@@ -65,6 +71,12 @@ async def upload_file(file: UploadFile = File(...)):
         )
         
     try:
+        # Validate authentication and check daily upload limits
+        user_id = auth.get_user_id(authorization)
+        is_guest = (user_id is None)
+        identifier = auth.get_identifier(authorization, x_guest_id)
+        usage.check_and_increment_upload(identifier, is_guest)
+        
         # Read the file content
         file_bytes = await file.read()
         
@@ -101,6 +113,9 @@ async def upload_file(file: UploadFile = File(...)):
         # 5. Save chunk embeddings to local store
         save_chunks(doc_id, chunks, embeddings_list)
         
+        # 6. Check document limits for the chat and link document
+        usage.check_and_add_document_to_conversation(conversation_id, doc_id)
+        
         return {
             "doc_id": doc_id,
             "num_chunks": len(chunks)
@@ -131,6 +146,8 @@ def generate_study_material(payload: GenerateRequest):
         )
         return {"result": result}
         
+    except HTTPException as he:
+        raise he
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
@@ -138,24 +155,45 @@ def generate_study_material(payload: GenerateRequest):
         raise HTTPException(status_code=500, detail=f"Failed to generate material: {str(e)}")
 
 @app.post("/chat")
-def chat_with_assistant(payload: ChatRequest):
+def chat_with_assistant(payload: ChatRequest, authorization: str | None = Header(None)):
     """
     Handles free-form educational chat with optional document grounding.
     """
     try:
+        user_id = auth.get_user_id(authorization)
         response_text, conversation_id = chat.chat(
             conversation_id=payload.conversation_id,
             message=payload.message,
-            doc_id=payload.doc_id
+            doc_id=payload.doc_id,
+            user_id=user_id
         )
         return {
             "conversation_id": conversation_id,
             "response": response_text
         }
+    except HTTPException as he:
+        raise he
     except Exception as e:
         print(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to process chat: {str(e)}")
 
+
+@app.get("/conversations")
+def get_conversations(authorization: str | None = Header(None)):
+    """
+    Retrieves list of conversations for the authenticated user.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Please log in to view chat history")
+    try:
+        user_id = auth.get_user_id(authorization)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Please log in to view chat history")
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Please log in to view chat history")
+        
+    return chat.get_user_conversations(user_id)
+
 if __name__ == "__main__":
     # Run uvicorn on port 8000 with reload=True
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)

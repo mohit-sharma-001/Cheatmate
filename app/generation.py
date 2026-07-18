@@ -111,8 +111,15 @@ INSTRUCTIONS:
 
     # 6. Generate output using gemini-2.0-flash
     model = genai.GenerativeModel("gemini-flash-lite-latest")
-    response = model.generate_content(full_prompt)
-    text_response = response.text
+    try:
+        response = model.generate_content(full_prompt)
+        text_response = response.text
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "429" in err_msg or "quota" in err_msg:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=429, detail="You've hit today's message limit. Please try again tomorrow.")
+        raise e
     
     # 7. Post-process to strip markdown code fences for JSON outputs
     if feature in ("flashcards", "quiz"):

@@ -386,59 +386,67 @@ class TestAPIEndpoints(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
 
+    @patch("app.main.usage.check_and_add_document_to_conversation")
+    @patch("app.main.usage.check_and_increment_upload")
     @patch("app.main.extract_text_from_pdf")
     @patch("app.main.embed_batch")
     @patch("app.main.save_chunks")
-    def test_upload_endpoint(self, mock_save, mock_embed_batch, mock_extract):
+    def test_upload_endpoint(self, mock_save, mock_embed_batch, mock_extract, mock_check_upload, mock_add_doc):
         mock_extract.return_value = "Extracted PDF contents."
         mock_embed_batch.return_value = [[0.1, 0.2]]
         
         pdf_content = b"%PDF-1.4 mock pdf content"
         files = {"file": ("test.pdf", pdf_content, "application/pdf")}
         
-        response = self.client.post("/upload", files=files)
+        response = self.client.post("/upload", files=files, headers={"X-Guest-Id": "test-guest"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("doc_id", data)
         self.assertEqual(data["num_chunks"], 1)
 
+    @patch("app.main.usage.check_and_add_document_to_conversation")
+    @patch("app.main.usage.check_and_increment_upload")
     @patch("app.main.extract_text_from_docx")
     @patch("app.main.embed_batch")
     @patch("app.main.save_chunks")
-    def test_upload_endpoint_docx(self, mock_save, mock_embed_batch, mock_extract_docx):
+    def test_upload_endpoint_docx(self, mock_save, mock_embed_batch, mock_extract_docx, mock_check_upload, mock_add_doc):
         mock_extract_docx.return_value = "Extracted DOCX content."
         mock_embed_batch.return_value = [[0.1, 0.2]]
         
         files = {"file": ("test.docx", b"dummy docx bytes", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
-        response = self.client.post("/upload", files=files)
+        response = self.client.post("/upload", files=files, headers={"X-Guest-Id": "test-guest"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("doc_id", data)
         mock_extract_docx.assert_called_once()
 
+    @patch("app.main.usage.check_and_add_document_to_conversation")
+    @patch("app.main.usage.check_and_increment_upload")
     @patch("app.main.extract_text_from_txt")
     @patch("app.main.embed_batch")
     @patch("app.main.save_chunks")
-    def test_upload_endpoint_txt(self, mock_save, mock_embed_batch, mock_extract_txt):
+    def test_upload_endpoint_txt(self, mock_save, mock_embed_batch, mock_extract_txt, mock_check_upload, mock_add_doc):
         mock_extract_txt.return_value = "Extracted TXT content."
         mock_embed_batch.return_value = [[0.1, 0.2]]
         
         files = {"file": ("test.txt", b"dummy txt content", "text/plain")}
-        response = self.client.post("/upload", files=files)
+        response = self.client.post("/upload", files=files, headers={"X-Guest-Id": "test-guest"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("doc_id", data)
         mock_extract_txt.assert_called_once()
 
+    @patch("app.main.usage.check_and_add_document_to_conversation")
+    @patch("app.main.usage.check_and_increment_upload")
     @patch("app.main.extract_text_from_image")
     @patch("app.main.embed_batch")
     @patch("app.main.save_chunks")
-    def test_upload_endpoint_image(self, mock_save, mock_embed_batch, mock_extract_img):
+    def test_upload_endpoint_image(self, mock_save, mock_embed_batch, mock_extract_img, mock_check_upload, mock_add_doc):
         mock_extract_img.return_value = "Extracted image text content."
         mock_embed_batch.return_value = [[0.1, 0.2]]
         
         files = {"file": ("test.png", b"fake image bytes", "image/png")}
-        response = self.client.post("/upload", files=files)
+        response = self.client.post("/upload", files=files, headers={"X-Guest-Id": "test-guest"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn("doc_id", data)
@@ -500,7 +508,270 @@ class TestAPIEndpoints(unittest.TestCase):
             "conversation_id": "existing-uuid-1234",
             "response": "Response with history"
         })
-        mock_chat.assert_called_once_with(conversation_id="existing-uuid-1234", message="Continue discussing", doc_id="doc-uuid-5678")
+        mock_chat.assert_called_once_with(conversation_id="existing-uuid-1234", message="Continue discussing", doc_id="doc-uuid-5678", user_id=None)
+
+class TestAuth(unittest.TestCase):
+    @patch("app.auth.jwks_client")
+    @patch("jwt.decode")
+    def test_get_user_id_valid_token(self, mock_jwt_decode, mock_jwks_client):
+        from app import auth
+        mock_signing_key = MagicMock()
+        mock_signing_key.key = "public_key"
+        mock_jwks_client.get_signing_key_from_jwt.return_value = mock_signing_key
+        mock_jwt_decode.return_value = {"sub": "user-uuid-123"}
+
+        res = auth.get_user_id("Bearer valid.jwt.token")
+        self.assertEqual(res, "user-uuid-123")
+        mock_jwt_decode.assert_called_once()
+
+    def test_get_user_id_missing_or_invalid_header(self):
+        from app import auth
+        self.assertIsNone(auth.get_user_id(None))
+        self.assertIsNone(auth.get_user_id("InvalidHeader"))
+        self.assertIsNone(auth.get_user_id("Bearer"))
+
+    @patch("app.auth.jwks_client")
+    @patch("jwt.decode")
+    def test_get_user_id_expired(self, mock_jwt_decode, mock_jwks_client):
+        from app import auth
+        import jwt
+        mock_signing_key = MagicMock()
+        mock_jwks_client.get_signing_key_from_jwt.return_value = mock_signing_key
+        mock_jwt_decode.side_effect = jwt.ExpiredSignatureError("Token expired")
+
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            auth.get_user_id("Bearer expired.jwt.token")
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertIn("Invalid or expired session", ctx.exception.detail)
+
+    @patch("app.auth.get_user_id")
+    def test_get_identifier_logged_in(self, mock_get_user_id):
+        from app import auth
+        mock_get_user_id.return_value = "user-uuid-123"
+        res = auth.get_identifier("Bearer some-token", "guest-id")
+        self.assertEqual(res, "user-uuid-123")
+
+    @patch("app.auth.get_user_id")
+    def test_get_identifier_guest(self, mock_get_user_id):
+        from app import auth
+        mock_get_user_id.return_value = None
+        res = auth.get_identifier(None, "guest-id-123")
+        self.assertEqual(res, "guest-id-123")
+
+    @patch("app.auth.get_user_id")
+    def test_get_identifier_missing(self, mock_get_user_id):
+        from app import auth
+        mock_get_user_id.return_value = None
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            auth.get_identifier(None, None)
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("Missing guest identifier", ctx.exception.detail)
+
+class TestUsage(unittest.TestCase):
+    @patch("app.usage._get_connection")
+    def test_check_increment_upload_under_limit(self, mock_get_conn):
+        from app import usage
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (1,)
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        usage.check_and_increment_upload("user-123", is_guest=False)
+        self.assertEqual(mock_cur.execute.call_count, 2)
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.usage._get_connection")
+    def test_check_increment_upload_guest_at_limit(self, mock_get_conn):
+        from app import usage
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (2,)
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            usage.check_and_increment_upload("guest-123", is_guest=True)
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertIn("higher limit", ctx.exception.detail)
+
+    @patch("app.usage._get_connection")
+    def test_check_increment_upload_user_at_limit(self, mock_get_conn):
+        from app import usage
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (5,)
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            usage.check_and_increment_upload("user-123", is_guest=False)
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertNotIn("higher limit", ctx.exception.detail)
+
+    def test_check_add_document_to_conversation_none(self):
+        from app import usage
+        # should do nothing if conversation_id is None
+        usage.check_and_add_document_to_conversation(None, "doc-123")
+
+    @patch("app.usage._get_connection")
+    def test_check_add_document_to_conversation_under_limit(self, mock_get_conn):
+        from app import usage
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (3,)
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        usage.check_and_add_document_to_conversation("conv-123", "doc-123")
+        self.assertEqual(mock_cur.execute.call_count, 2)
+        mock_conn.commit.assert_called_once()
+
+    @patch("app.usage._get_connection")
+    def test_check_add_document_to_conversation_at_limit(self, mock_get_conn):
+        from app import usage
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.return_value = (5,)
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as ctx:
+            usage.check_and_add_document_to_conversation("conv-123", "doc-123")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("maximum of 5 documents", ctx.exception.detail)
+
+class TestChatUpdates(unittest.TestCase):
+    @patch("app.chat._get_connection")
+    def test_get_or_create_conversation_new_with_user(self, mock_get_conn):
+        from app import chat
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchone.side_effect = [(False,), ("new-uuid-456",)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        res = chat.get_or_create_conversation("non-existent-uuid", user_id="user-uuid-123")
+        self.assertEqual(res, "new-uuid-456")
+        self.assertEqual(mock_cur.execute.call_count, 3)
+        mock_cur.execute.assert_any_call("UPDATE conversations SET user_id = %s WHERE id = %s", ("user-uuid-123", "new-uuid-456"))
+
+    @patch("app.chat._get_connection")
+    def test_get_user_conversations(self, mock_get_conn):
+        from app import chat
+        import datetime
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [
+            ("conv-uuid-1", datetime.datetime(2026, 7, 17, 12, 0, 0), "Preview msg 1"),
+            ("conv-uuid-2", None, None)
+        ]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_get_conn.return_value = mock_conn
+
+        res = chat.get_user_conversations("user-uuid-123")
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[0]["id"], "conv-uuid-1")
+        self.assertEqual(res[0]["preview"], "Preview msg 1")
+        self.assertEqual(res[1]["preview"], "")
+
+class TestAPIEndpointsNew(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("app.main.auth.get_user_id")
+    @patch("app.main.auth.get_identifier")
+    @patch("app.main.usage.check_and_increment_upload")
+    @patch("app.main.extract_text_from_pdf")
+    @patch("app.main.embed_batch")
+    @patch("app.main.save_chunks")
+    @patch("app.main.usage.check_and_add_document_to_conversation")
+    def test_upload_endpoint_with_auth_and_limit(self, mock_add_doc, mock_save, mock_embed, mock_extract, mock_check_upload, mock_get_id, mock_get_uid):
+        mock_get_uid.return_value = "user-uuid"
+        mock_get_id.return_value = "user-uuid"
+        mock_extract.return_value = "Extracted PDF contents."
+        mock_embed.return_value = [[0.1, 0.2]]
+        
+        pdf_content = b"%PDF-1.4 mock pdf content"
+        files = {"file": ("test.pdf", pdf_content, "application/pdf")}
+        data = {"conversation_id": "conv-uuid-123"}
+        headers = {"Authorization": "Bearer valid-jwt-token"}
+
+        response = self.client.post("/upload", files=files, data=data, headers=headers)
+        self.assertEqual(response.status_code, 200)
+        mock_check_upload.assert_called_once_with("user-uuid", False)
+        mock_add_doc.assert_called_once_with("conv-uuid-123", response.json()["doc_id"])
+
+    @patch("app.main.auth.get_user_id")
+    @patch("app.main.auth.get_identifier")
+    @patch("app.main.usage.check_and_increment_upload")
+    def test_upload_endpoint_rate_limited(self, mock_check_upload, mock_get_id, mock_get_uid):
+        mock_get_uid.return_value = None
+        mock_get_id.return_value = "guest-uuid"
+        from fastapi import HTTPException
+        mock_check_upload.side_effect = HTTPException(status_code=429, detail="Limit exceeded")
+
+        files = {"file": ("test.pdf", b"pdf content", "application/pdf")}
+        headers = {"X-Guest-Id": "guest-uuid"}
+        response = self.client.post("/upload", files=files, headers=headers)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json()["detail"], "Limit exceeded")
+
+    @patch("app.main.auth.get_user_id")
+    @patch("app.main.chat.chat")
+    def test_chat_endpoint_quota_limit(self, mock_chat, mock_get_uid):
+        mock_get_uid.return_value = "user-uuid"
+        from fastapi import HTTPException
+        mock_chat.side_effect = HTTPException(status_code=429, detail="Quota exceeded")
+
+        payload = {"message": "Hello"}
+        headers = {"Authorization": "Bearer valid-token"}
+        response = self.client.post("/chat", json=payload, headers=headers)
+        self.assertEqual(response.status_code, 429)
+
+    @patch("app.main.doc_exists")
+    @patch("app.main.generate_notes")
+    def test_generate_endpoint_quota_limit(self, mock_generate, mock_doc_exists):
+        mock_doc_exists.return_value = True
+        from fastapi import HTTPException
+        mock_generate.side_effect = HTTPException(status_code=429, detail="Quota exceeded")
+
+        payload = {"doc_id": "doc-uuid", "feature": "quiz", "instruction": "Make quiz"}
+        response = self.client.post("/generate", json=payload)
+        self.assertEqual(response.status_code, 429)
+
+    def test_get_conversations_missing_auth(self):
+        response = self.client.get("/conversations")
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("Please log in to view chat history", response.json()["detail"])
+
+    @patch("app.main.auth.get_user_id")
+    def test_get_conversations_invalid_auth(self, mock_get_uid):
+        from fastapi import HTTPException
+        mock_get_uid.side_effect = HTTPException(status_code=401, detail="Expired token")
+
+        headers = {"Authorization": "Bearer invalid-token"}
+        response = self.client.get("/conversations", headers=headers)
+        self.assertEqual(response.status_code, 401)
+        # Note: endpoint overrides error detail
+        self.assertEqual(response.json()["detail"], "Please log in to view chat history")
+
+    @patch("app.main.auth.get_user_id")
+    @patch("app.main.chat.get_user_conversations")
+    def test_get_conversations_success(self, mock_get_convs, mock_get_uid):
+        mock_get_uid.return_value = "user-uuid"
+        mock_get_convs.return_value = [{"id": "c1", "created_at": "2026-07-17T12:00:00Z", "preview": "Hello"}]
+
+        headers = {"Authorization": "Bearer token"}
+        response = self.client.get("/conversations", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 1)
+        self.assertEqual(response.json()[0]["id"], "c1")
 
 if __name__ == "__main__":
     unittest.main()

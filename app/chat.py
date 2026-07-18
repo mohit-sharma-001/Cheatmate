@@ -121,7 +121,7 @@ def _get_connection():
             )
         raise e
 
-def get_or_create_conversation(conversation_id: str | None) -> str:
+def get_or_create_conversation(conversation_id: str | None, user_id: str | None = None) -> str:
     """
     Verifies if a conversation ID exists in the DB, returning it if found.
     If not provided or not found, creates a new conversation row and returns its UUID.
@@ -145,6 +145,11 @@ def get_or_create_conversation(conversation_id: str | None) -> str:
             # Create a new conversation row letting Postgres generate the UUID
             cur.execute("INSERT INTO conversations DEFAULT VALUES RETURNING id")
             new_id = cur.fetchone()[0]
+            
+            # Set user_id if provided
+            if user_id is not None:
+                cur.execute("UPDATE conversations SET user_id = %s WHERE id = %s", (user_id, new_id))
+                
             conn.commit()
             return str(new_id)
     except Exception as e:
@@ -209,14 +214,14 @@ def save_message(conversation_id: str, role: str, content: str) -> None:
         if conn:
             conn.close()
 
-def chat(conversation_id: str | None, message: str, doc_id: str | None) -> tuple[str, str]:
+def chat(conversation_id: str | None, message: str, doc_id: str | None, user_id: str | None = None) -> tuple[str, str]:
     """
     Performs a single chat turn. Handles RAG grounding, queries Gemini with
     recent message history from the DB, saves both user/assistant turns to the DB,
     and returns a tuple of (response_text, conversation_id).
     """
     # Get a valid verified conversation ID
-    conversation_id = get_or_create_conversation(conversation_id)
+    conversation_id = get_or_create_conversation(conversation_id, user_id)
 
     # Get recent messages from Postgres
     recent_messages = get_recent_messages(conversation_id, limit=6)
@@ -255,8 +260,15 @@ def chat(conversation_id: str | None, message: str, doc_id: str | None) -> tuple
         system_instruction=SYSTEM_INSTRUCTION
     )
     
-    response = model.generate_content(full_prompt)
-    response_text = response.text
+    try:
+        response = model.generate_content(full_prompt)
+        response_text = response.text
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "429" in err_msg or "quota" in err_msg:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=429, detail="You've hit today's message limit. Please try again tomorrow.")
+        raise e
 
     # Save both user prompt and model response to Postgres
     save_message(conversation_id, "user", message)
@@ -264,3 +276,49 @@ def chat(conversation_id: str | None, message: str, doc_id: str | None) -> tuple
 
     # Return response and verified/new conversation ID
     return response_text, conversation_id
+
+
+def get_user_conversations(user_id: str) -> list[dict]:
+    """
+    Retrieves all conversations for a specific user, including the first user message as a preview.
+    """
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            query = """
+                SELECT 
+                    c.id, 
+                    c.created_at, 
+                    (
+                        SELECT m.content 
+                        FROM messages m 
+                        WHERE m.conversation_id = c.id AND m.role = 'user' 
+                        ORDER BY m.created_at ASC, m.id ASC 
+                        LIMIT 1
+                    ) AS preview
+                FROM conversations c
+                WHERE c.user_id = %s
+                ORDER BY c.created_at DESC
+            """
+            cur.execute(query, (user_id,))
+            rows = cur.fetchall()
+            
+            results = []
+            for row in rows:
+                conv_id = str(row[0])
+                created_at = row[1].isoformat() if row[1] else None
+                preview = row[2] if row[2] is not None else ""
+                results.append({
+                    "id": conv_id,
+                    "created_at": created_at,
+                    "preview": preview
+                })
+            return results
+    except Exception as e:
+        print(f"Database error in get_user_conversations: {e}")
+        return []
+    finally:
+        if conn:
+            conn.close()
+
