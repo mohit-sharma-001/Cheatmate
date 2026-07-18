@@ -175,7 +175,7 @@ class TestVectorStore(unittest.TestCase):
         mock_conn.cursor.return_value = mock_cur
         mock_connect.return_value = mock_conn
         
-        results = vectorstore.search("test-doc", [0.1, 0.2], top_k=2)
+        results = vectorstore.search(["test-doc"], [0.1, 0.2], top_k=2)
         
         self.assertEqual(results, ["result text 1", "result text 2"])
         self.assertTrue(mock_cur.execute.called)
@@ -225,7 +225,7 @@ class TestGeneration(unittest.TestCase):
         
         # Generate flashcards
         result = generate_notes(
-            doc_id="test-doc",
+            doc_ids=["test-doc"],
             feature="flashcards",
             user_instruction="Generate 1 flashcard"
         )
@@ -234,7 +234,7 @@ class TestGeneration(unittest.TestCase):
         self.assertEqual(result, "[{\"question\": \"Q\", \"answer\": \"A\"}]")
         
         # Verify search was called
-        mock_search.assert_called_once_with("test-doc", [0.1, 0.2], top_k=5)
+        mock_search.assert_called_once_with(["test-doc"], [0.1, 0.2], top_k=5)
         
         # Verify prompt had context and instruction
         call_args = mock_model_instance.generate_content.call_args[0][0]
@@ -322,7 +322,7 @@ class TestChatModule(unittest.TestCase):
         mock_model_instance.generate_content.return_value = mock_response
         mock_gen_model.return_value = mock_model_instance
         
-        response, returned_id = chat.chat("test-conv-2", "Hello study assistant", doc_id=None)
+        response, returned_id = chat.chat("test-conv-2", "Hello study assistant", doc_ids=None)
         
         self.assertEqual(response, "Hello! I am CheatMate.")
         self.assertEqual(returned_id, "verified-uuid")
@@ -362,7 +362,7 @@ class TestChatModule(unittest.TestCase):
         mock_model_instance.generate_content.return_value = mock_response
         mock_gen_model.return_value = mock_model_instance
         
-        response, returned_id = chat.chat("test-conv-3", "Explain photosynthesis", doc_id="my-doc")
+        response, returned_id = chat.chat("test-conv-3", "Explain photosynthesis", doc_ids=["my-doc"])
         
         self.assertEqual(response, "Grounded response.")
         self.assertEqual(returned_id, "verified-uuid")
@@ -370,7 +370,7 @@ class TestChatModule(unittest.TestCase):
         # Verify vector store query was performed
         mock_doc_exists.assert_called_once_with("my-doc")
         mock_embed.assert_called_once_with("Explain photosynthesis")
-        mock_search.assert_called_once_with("my-doc", [0.1, 0.2], top_k=5)
+        mock_search.assert_called_once_with(["my-doc"], [0.1, 0.2], top_k=5)
         
         # Verify prompt details
         call_args = mock_model_instance.generate_content.call_args[0][0]
@@ -466,7 +466,7 @@ class TestAPIEndpoints(unittest.TestCase):
         mock_generate_notes.return_value = "Detailed notes content"
         
         payload = {
-            "doc_id": "existing-doc-uuid",
+            "doc_ids": ["existing-doc-uuid"],
             "feature": "long_notes",
             "instruction": "Explain everything"
         }
@@ -499,7 +499,7 @@ class TestAPIEndpoints(unittest.TestCase):
         payload = {
             "conversation_id": "existing-uuid-1234",
             "message": "Continue discussing",
-            "doc_id": "doc-uuid-5678"
+            "doc_ids": ["doc-uuid-5678"]
         }
         
         response = self.client.post("/chat", json=payload)
@@ -508,7 +508,7 @@ class TestAPIEndpoints(unittest.TestCase):
             "conversation_id": "existing-uuid-1234",
             "response": "Response with history"
         })
-        mock_chat.assert_called_once_with(conversation_id="existing-uuid-1234", message="Continue discussing", doc_id="doc-uuid-5678", user_id=None)
+        mock_chat.assert_called_once_with(conversation_id="existing-uuid-1234", message="Continue discussing", doc_ids=["doc-uuid-5678"], user_id=None)
 
 class TestAuth(unittest.TestCase):
     @patch("app.auth.jwks_client")
@@ -741,7 +741,7 @@ class TestAPIEndpointsNew(unittest.TestCase):
         from fastapi import HTTPException
         mock_generate.side_effect = HTTPException(status_code=429, detail="Quota exceeded")
 
-        payload = {"doc_id": "doc-uuid", "feature": "quiz", "instruction": "Make quiz"}
+        payload = {"doc_ids": ["doc-uuid"], "feature": "quiz", "instruction": "Make quiz"}
         response = self.client.post("/generate", json=payload)
         self.assertEqual(response.status_code, 429)
 

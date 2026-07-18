@@ -65,23 +65,24 @@ def _strip_markdown_code_fences(text: str) -> str:
         
     return text.strip()
 
-def generate_notes(doc_id: str, feature: str, user_instruction: str) -> str:
+def generate_notes(doc_ids: list[str], feature: str, user_instruction: str) -> str:
     """
     Retrieves the top 5 relevant document chunks for the user instruction, 
     constructs a feature-specific prompt, and calls Gemini (gemini-flash-lite-latest) 
     to generate the final grounded study materials.
     """
-    # 1. Validate doc exists
-    if not vectorstore.doc_exists(doc_id):
-        raise ValueError(f"Document with ID {doc_id} does not exist.")
+    # 1. Validate docs exist
+    for d in doc_ids:
+        if not vectorstore.doc_exists(d):
+            raise ValueError(f"Document with ID {d} does not exist.")
         
     # 2. Embed user instruction
     query_embedding = embeddings.embed_text(user_instruction)
     
     # 3. Retrieve relevant chunks (top 5)
-    relevant_chunks = vectorstore.search(doc_id, query_embedding, top_k=5)
+    relevant_chunks = vectorstore.search(doc_ids, query_embedding, top_k=5)
     if not relevant_chunks:
-        return "No relevant context found in the document to answer the request."
+        return "No relevant context found in the documents to answer the request."
         
     # Combine chunks to form context block
     context = "\n---\n".join(relevant_chunks)

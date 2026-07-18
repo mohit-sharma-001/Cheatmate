@@ -33,7 +33,7 @@ app.add_middleware(
 
 # Request schema for generation
 class GenerateRequest(BaseModel):
-    doc_id: str
+    doc_ids: list[str]
     feature: str
     instruction: str
 
@@ -41,7 +41,7 @@ class GenerateRequest(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str | None = None
     message: str
-    doc_id: str | None = None
+    doc_ids: list[str] | None = None
 
 @app.get("/health")
 def health_check():
@@ -130,17 +130,18 @@ async def upload_file(
 @app.post("/generate")
 def generate_study_material(payload: GenerateRequest):
     """
-    Retrieves relevant context for the doc_id using the user instruction, 
+    Retrieves relevant context for the doc_ids using the user instruction, 
     and generates study materials based on the chosen feature template.
     """
-    # 1. Verify doc exists
-    if not doc_exists(payload.doc_id):
-        raise HTTPException(status_code=404, detail=f"Document with ID {payload.doc_id} not found.")
+    # 1. Verify docs exist
+    for d in payload.doc_ids:
+        if not doc_exists(d):
+            raise HTTPException(status_code=404, detail=f"Document with ID {d} not found.")
         
     try:
         # 2. Generate grounded study notes/flashcards/quiz
         result = generate_notes(
-            doc_id=payload.doc_id,
+            doc_ids=payload.doc_ids,
             feature=payload.feature,
             user_instruction=payload.instruction
         )
@@ -164,7 +165,7 @@ def chat_with_assistant(payload: ChatRequest, authorization: str | None = Header
         response_text, conversation_id = chat.chat(
             conversation_id=payload.conversation_id,
             message=payload.message,
-            doc_id=payload.doc_id,
+            doc_ids=payload.doc_ids,
             user_id=user_id
         )
         return {
@@ -193,6 +194,22 @@ def get_conversations(authorization: str | None = Header(None)):
         raise HTTPException(status_code=401, detail="Please log in to view chat history")
         
     return chat.get_user_conversations(user_id)
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_conversation_messages(conversation_id: str, authorization: str | None = Header(None)):
+    """
+    Retrieves message history for a specific conversation.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Please log in to view chat history")
+    try:
+        user_id = auth.get_user_id(authorization)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Please log in to view chat history")
+    except HTTPException:
+        raise HTTPException(status_code=401, detail="Please log in to view chat history")
+        
+    return chat.get_conversation_messages(conversation_id, user_id)
 
 if __name__ == "__main__":
     # Run uvicorn on port 8000 with reload=True

@@ -119,10 +119,11 @@ def save_chunks(doc_id: str, chunks: list[str], embeddings: list[list[float]]):
         if conn:
             conn.close()
 
-def search(doc_id: str, query_embedding: list[float], top_k: int = 5) -> list[str]:
+def search(doc_ids: list[str], query_embedding: list[float], top_k: int = 5) -> list[str]:
     """
-    Searches stored chunks for a specific doc_id using pgvector cosine distance operator (<=>).
-    Returns the top_k most similar chunk texts.
+    Searches stored chunks for a list of doc_ids using pgvector cosine distance operator (<=>).
+    Retrieves a fixed per-document limit of 3 chunks per document separately to guarantee
+    every attached document contributes context. Total context size scales with number of attached docs.
     """
     conn = None
     try:
@@ -130,19 +131,22 @@ def search(doc_id: str, query_embedding: list[float], top_k: int = 5) -> list[st
         emb_str = f"[{','.join(map(str, query_embedding))}]"
         
         conn = _get_connection()
+        all_results = []
         with conn.cursor() as cur:
-            # SQL Query selecting the text, ordered by cosine distance
-            query = """
-                SELECT text FROM chunks
-                WHERE doc_id = %s
-                ORDER BY embedding <=> %s::vector ASC
-                LIMIT %s
-            """
-            cur.execute(query, (doc_id, emb_str, top_k))
-            results = cur.fetchall()
+            for doc_id in doc_ids:
+                # SQL Query selecting the text for a single doc_id
+                query = """
+                    SELECT text FROM chunks
+                    WHERE doc_id = %s
+                    ORDER BY embedding <=> %s::vector ASC
+                    LIMIT 3
+                """
+                cur.execute(query, (doc_id, emb_str))
+                results = cur.fetchall()
+                all_results.extend([row[0] for row in results])
             
-            # Return list of text values
-            return [row[0] for row in results]
+            # Return combined list of text values
+            return all_results
             
     except Exception as e:
         print(f"Database error in search: {e}")

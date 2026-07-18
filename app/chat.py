@@ -2,6 +2,7 @@ import os
 import psycopg2
 import google.generativeai as genai
 from dotenv import load_dotenv
+from fastapi import HTTPException
 from app import embeddings
 from app import vectorstore
 
@@ -214,7 +215,7 @@ def save_message(conversation_id: str, role: str, content: str) -> None:
         if conn:
             conn.close()
 
-def chat(conversation_id: str | None, message: str, doc_id: str | None, user_id: str | None = None) -> tuple[str, str]:
+def chat(conversation_id: str | None, message: str, doc_ids: list[str] | None, user_id: str | None = None) -> tuple[str, str]:
     """
     Performs a single chat turn. Handles RAG grounding, queries Gemini with
     recent message history from the DB, saves both user/assistant turns to the DB,
@@ -228,11 +229,14 @@ def chat(conversation_id: str | None, message: str, doc_id: str | None, user_id:
 
     # Grounding context from document
     context = None
-    if doc_id and vectorstore.doc_exists(doc_id):
-        query_embedding = embeddings.embed_text(message)
-        relevant_chunks = vectorstore.search(doc_id, query_embedding, top_k=5)
-        if relevant_chunks:
-            context = "\n---\n".join(relevant_chunks)
+    if doc_ids:
+        # Filter down to documents that actually exist
+        existing_doc_ids = [d for d in doc_ids if vectorstore.doc_exists(d)]
+        if existing_doc_ids:
+            query_embedding = embeddings.embed_text(message)
+            relevant_chunks = vectorstore.search(existing_doc_ids, query_embedding, top_k=5)
+            if relevant_chunks:
+                context = "\n---\n".join(relevant_chunks)
 
     # Build prompt
     prompt_parts = []
@@ -318,6 +322,51 @@ def get_user_conversations(user_id: str) -> list[dict]:
     except Exception as e:
         print(f"Database error in get_user_conversations: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_conversation_messages(conversation_id: str, user_id: str) -> list[dict]:
+    """
+    Retrieves message history for a specific conversation after verifying ownership.
+    """
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            # 1. Verify ownership of the conversation (and that it exists)
+            try:
+                verify_query = "SELECT 1 FROM conversations WHERE id = %s AND user_id = %s"
+                cur.execute(verify_query, (conversation_id, user_id))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Conversation not found")
+            except HTTPException:
+                raise
+            except Exception:
+                # If invalid UUID string format, Postgres might raise an error.
+                # Rollback connection and raise 404.
+                if conn:
+                    conn.rollback()
+                raise HTTPException(status_code=404, detail="Conversation not found")
+
+            # 2. Query messages in chronological order
+            messages_query = """
+                SELECT role, content 
+                FROM messages 
+                WHERE conversation_id = %s 
+                ORDER BY created_at ASC, id ASC
+            """
+            cur.execute(messages_query, (conversation_id,))
+            rows = cur.fetchall()
+
+            return [{"role": row[0], "content": row[1]} for row in rows]
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Database error in get_conversation_messages: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     finally:
         if conn:
             conn.close()
