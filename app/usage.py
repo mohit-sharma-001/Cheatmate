@@ -185,3 +185,53 @@ def check_and_add_document_to_conversation(conversation_id: str | None, doc_id: 
     finally:
         if conn:
             conn.close()
+
+def check_and_increment_download(identifier: str, is_guest: bool) -> None:
+    """
+    Checks if the user (or guest) has hit their daily download limit.
+    If limit is reached, raises HTTPException(429).
+    Otherwise, increments or inserts the count for today in the download_usage table.
+    """
+    limit = 2 if is_guest else 5
+    conn = None
+    try:
+        conn = _get_connection()
+        with conn.cursor() as cur:
+            # Check current download count for today
+            query_check = """
+                SELECT download_count FROM download_usage
+                WHERE identifier = %s AND usage_date = CURRENT_DATE
+            """
+            cur.execute(query_check, (identifier,))
+            row = cur.fetchone()
+            
+            if row and row[0] >= limit:
+                raise HTTPException(
+                    status_code=429,
+                    detail="You've hit today's download limit. Try again tomorrow." + (" Log in for a higher limit." if is_guest else "")
+                )
+            
+            # Insert a new row, or increment download_count if one already exists for today
+            query_upsert = """
+                INSERT INTO download_usage (identifier, usage_date, download_count)
+                VALUES (%s, CURRENT_DATE, 1)
+                ON CONFLICT (identifier, usage_date)
+                DO UPDATE SET download_count = download_usage.download_count + 1
+            """
+            cur.execute(query_upsert, (identifier,))
+            conn.commit()
+            
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error checking/incrementing download usage: {e}")
+        if conn:
+            conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error checking download usage: {str(e)}"
+        )
+    finally:
+        if conn:
+            conn.close()
+

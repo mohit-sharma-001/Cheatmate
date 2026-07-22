@@ -12,6 +12,8 @@ from app.generation import generate_notes
 from app import chat
 from app.extract import extract_text_from_docx, extract_text_from_txt, extract_text_from_image
 from app import auth, usage
+from app.pdf_generator import generate_handwritten_pdf
+from fastapi.responses import StreamingResponse
 
 
 
@@ -42,6 +44,12 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     message: str
     doc_ids: list[str] | None = None
+
+# Request schema for PDF download
+class PDFDownloadRequest(BaseModel):
+    content: str
+    feature: str
+    title: str
 
 @app.get("/health")
 def health_check():
@@ -210,6 +218,48 @@ def get_conversation_messages(conversation_id: str, authorization: str | None = 
         raise HTTPException(status_code=401, detail="Please log in to view chat history")
         
     return chat.get_conversation_messages(conversation_id, user_id)
+
+@app.post("/download/pdf")
+async def download_pdf(
+    payload: PDFDownloadRequest,
+    authorization: str | None = Header(None),
+    x_guest_id: str | None = Header(None, alias="X-Guest-Id")
+):
+    """
+    Accepts content, feature, and title, checks the user's daily download limits,
+    generates a handwritten-style PDF, and returns it as a StreamingResponse.
+    """
+    try:
+        user_id = auth.get_user_id(authorization)
+        is_guest = (user_id is None)
+        identifier = auth.get_identifier(authorization, x_guest_id)
+        
+        # Enforce rate limits
+        usage.check_and_increment_download(identifier, is_guest)
+        
+        # Generate the PDF
+        pdf_bytes = generate_handwritten_pdf(
+            content=payload.content,
+            feature=payload.feature,
+            title=payload.title
+        )
+        
+        import io
+        pdf_io = io.BytesIO(pdf_bytes)
+        filename = f"cheatmate_{payload.feature}.pdf"
+        
+        return StreamingResponse(
+            pdf_io,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error during PDF generation/download: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate PDF: {str(e)}")
 
 if __name__ == "__main__":
     # Run uvicorn on port 8000 with reload=True
